@@ -14,7 +14,8 @@
         "cursor",
         "ZenSentry",
         "mem reduct",
-        "antigravity"
+        "antigravity",
+        "blender"
     ],
     "BLACKLIST_APPS": [
         "discord",
@@ -41,7 +42,6 @@
         "classroom",
         "assignment",
         "thesis",
-        "ai safety",
         "ethics",
         "alignment",
         "interpretability",
@@ -59,9 +59,7 @@
         "shell",
         "terminal",
         "docker",
-        "ssh",
-        "iitm",
-        "iitmadras"
+        "ssh"
     ],
     "SYSTEM_TITLES": [
         "system tray overflow window",
