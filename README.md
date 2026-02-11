@@ -64,5 +64,6 @@ Zen Sentry is a Python-based focus enforcement tool designed to help you maintai
 - Data is saved to `zen_sentry.db` (SQLite).
 - If you miss a day, the system detects it on next login and deducts the missed Daily Goal points from your Bank.
 
+Configue through zen_config.json
 ---
 *Stay Focused.*
