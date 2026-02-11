@@ -32,17 +32,16 @@ class ZenTracker:
     def __init__(self, db_instance):
         self.db = db_instance
         
-        # 1. Economy Setup (Must come first to initialize Today's row)
-        self.bank_balance, self.current_score = self.db.get_bank_balance()
-        self.daily_par = config.ECONOMY.get("DAILY_GOAL", 1200)
-        self.daily_target = max(self.daily_par - self.bank_balance, 0)
+        # 1. Economy Setup 
+        # Returns: (Start_Bank, Today_Score, Today_Target)
+        self.bank_start_balance, self.current_score, self.daily_target = self.db.get_bank_balance()
         
         # 2. RUN STARTUP AUDIT (Ghost Debt Fix)
+        # Audit logic might impact balance, so we reload.
         self._perform_startup_audit()
 
-        # Reload after audit in case penalties were applied
-        self.bank_balance, self.current_score = self.db.get_bank_balance()
-        self.daily_target = max(self.daily_par - self.bank_balance, 0)
+        # Reload after audit
+        self.bank_start_balance, self.current_score, self.daily_target = self.db.get_bank_balance()
         
         self.multiplier = 1.0
         self.shadow_multiplier = 1.0 # Preserves streak during Trust
@@ -88,8 +87,11 @@ class ZenTracker:
 
         if delta > 1:
             missed_days = delta - 1
-            # Penalty logic: 1200 pts per missed day
-            penalty = missed_days * config.ECONOMY.get("DAILY_GOAL", 1200)
+            # Penalty logic: 1200 pts per missed day 
+            # NOTE: With new debt logic, do we still need generic penalty? 
+            # User didn't specify removal, but Debt handles "missed work". 
+            # Let's keep strict "Absentee Penalty" separate from Performance Debt for now.
+            penalty = missed_days * config.ECONOMY.get("DAILY_GOAL", 1400)
             print(f"[AUDIT] Missed {missed_days} days. Deducting {penalty} pts.")
             self.db.update_balance(-penalty, 0) # Updates Today's row
             self.db.log_event("AUDIT", f"Absentee Penalty: -{penalty}")
@@ -107,22 +109,16 @@ class ZenTracker:
         today = datetime.date.today()
         if today != self.last_date:
             print("[SYSTEM] Midnight Reset.")
-            # 1. Finalize Yesterday (Save Score)
-            # Note: We do NOT need to calculate 'net_change' here because 'get_bank_balance' 
-            # for the *new day* will look at Yesterday's Score and calculate the rollover.
-            # We just ensure Yesterday's final score is physically in the DB.
-            # And since 'update_balance' is called periodically and on events, 
-            # it's likely already there, but let's be safe.
+            # 1. Finalize Yesterday
             self.db.update_balance(0, self.current_score, date_str=self.last_date.strftime("%Y-%m-%d"))
             
             # 2. Trigger New Day Rollover
             self.last_date = today
-            self.bank_balance, _ = self.db.get_bank_balance()
+            self.bank_start_balance, _, self.daily_target = self.db.get_bank_balance()
             
             # 3. Reset Stats
             self.current_score = 0
             self.goal_reached = False
-            self.daily_target = max(self.daily_par - self.bank_balance, 0)
             
             self.db.set_last_login_today()
             self.db.log_event("SYSTEM", f"New Day. Target: {self.daily_target}")
@@ -203,7 +199,12 @@ class ZenTracker:
         # Standard Idle Pause
         if idle_top > self.idle_timeout_override and not is_audio:
             if not self.is_paused: self.is_paused = True
-            return {"state": "PAUSED", "score": int(self.current_score), "mult": self.multiplier, "bank": self.bank_balance, "notify": notification}
+            
+            # Recalculate Bank for display
+            surplus = max(0, self.current_score - self.daily_target)
+            realtime_bank = self.bank_start_balance + surplus
+            
+            return {"state": "PAUSED", "score": int(self.current_score), "mult": self.multiplier, "bank": realtime_bank, "notify": notification}
         
         if self.is_paused and idle_top < 5:
             self.is_paused = False
@@ -213,7 +214,10 @@ class ZenTracker:
         # ------------------
 
         if any(sys in title for sys in config.SYSTEM_TITLES):
-             return {"state": self.state, "score": int(self.current_score), "mult": self.multiplier, "bank": self.bank_balance, "notify": notification}
+             # Recalculate Bank for display
+             surplus = max(0, self.current_score - self.daily_target)
+             realtime_bank = self.bank_start_balance + surplus
+             return {"state": self.state, "score": int(self.current_score), "mult": self.multiplier, "bank": realtime_bank, "notify": notification}
 
         # Switch Logic
         if title != self.last_window_title:
@@ -311,13 +315,18 @@ class ZenTracker:
              
         # ENFORCE FLOOR
         # self.current_score = max(0, self.current_score)
+        
+        # Calculate Real-Time Dispaly Bank
+        # Bank = Start_Bank + Surplus
+        surplus = max(0, self.current_score - self.daily_target)
+        realtime_bank = self.bank_start_balance + surplus
 
         return {
             "state": self.state,
             "score": int(self.current_score),
             "multiplier": self.multiplier,
             "title": title,
-            "bank": self.bank_balance,
+            "bank": realtime_bank,
             "target": self.daily_target,
             "notify": notification
         }

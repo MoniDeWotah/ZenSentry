@@ -59,7 +59,9 @@
         "shell",
         "terminal",
         "docker",
-        "ssh"
+        "ssh",
+        "iitm",
+        "iitmadras"
     ],
     "SYSTEM_TITLES": [
         "system tray overflow window",
@@ -83,6 +85,8 @@
         "SWITCH_TAX": 0,
         "PENALTY": -20,
         "TRUST_BETRAYAL_PENALTY": -50,
-        "DAILY_GOAL": 1400
+        "DAILY_GOAL": 1400,
+        "MIN_DAILY_TARGET": 500,
+        "MAX_DAILY_TARGET": 10000
     }
 }

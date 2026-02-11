@@ -5,10 +5,16 @@ Zen Sentry is a Python-based focus enforcement tool designed to help you maintai
 ## How It Works
 
 ### 1. The Economy
-- **Focus Capital (Points)**: You earn points over time by staying in "Green" (Productive) or "Yellow" (Neutral) apps.
-- **Bank Balance**: Your total accumulated points across days.
-- **Daily Goal**: A target number of points to earn each day (Default: 1400).
-- **Rollover**: If you exceed your Daily Goal, the excess points are added to your Bank. If you miss it, the deficit is subtracted from your Bank.
+- **Focus Capital (Daily Target)**: Your goal for the day (Default: 1400 points).
+- **Bank Balance**: Stores *surplus* points earned above your daily target.
+- **Debt Accumulation**: If you miss your Daily Target, the deficit is added to the *Next Day's Target*.
+    - *Example*: Target 1400. Score 900. Next Day Target = 1400 + 500 = 1900.
+- **Smart Redemption**: Accumulated Bank points automatically reduce your Daily Target, down to a minimum floor.
+    - **Floor**: Target never drops below **500** (`MIN_DAILY_TARGET`).
+    - **Cap**: Target never exceeds **10,000** (`MAX_DAILY_TARGET`) to prevent perpetual debt.
+- **Rollover**: 
+    - **Surplus**: Stored in Bank.
+    - **Deficit**: Added to Tomorrow's Target.
 
 ### 2. Monitoring States
 - **🟩 GREEN (Productive)**: Whitelisted apps (e.g., VS Code, Obsidian) or titles containing session keywords. Multipliers increase streak (1.0x -> 1.5x).
