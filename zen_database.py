@@ -1,6 +1,7 @@
 import sqlite3
 import datetime
 import threading
+import math
 from zen_config import DB_PATH, ECONOMY
 
 class ZenDB:
@@ -87,7 +88,7 @@ class ZenDB:
             # 1. Check if Today exists
             self.cursor.execute("SELECT bank_balance, daily_score, daily_target FROM daily_stats WHERE date = ?", (today,))
             row = self.cursor.fetchone()
-            if row: return row[0], row[1], row[2]
+            if row: return int(row[0]), int(row[1]), int(math.ceil(row[2]))
             
             # 2. Find Last Active Day
             self.cursor.execute("SELECT date, bank_balance, daily_score, daily_target FROM daily_stats ORDER BY date DESC LIMIT 1")
@@ -101,12 +102,18 @@ class ZenDB:
                 
                 # --- Step A: Calculate Yesterday's Surplus/Deficit ---
                 # Surplus = Score - Target. (Negative means missed target)
-                surplus = last_score - last_target
+                # Ensure we are working with standard float/int first, but surplus should be int potentially?
+                # Let's cast inputs to float first to be safe, then convert result to int.
+                last_bank_f = float(last_bank)
+                last_score_f = float(last_score)
+                last_target_f = float(last_target)
+                
+                surplus = int(last_score_f - last_target_f)
                 
                 # --- Step B: Update Bank with Surplus ---
                 # Bank holds the "extra" work done.
                 # If surplus is negative, it subtracts from bank (using up saved work).
-                raw_bank = last_bank + surplus
+                raw_bank = int(last_bank_f + surplus)
                 
                 # --- Step C: Handle Debt (Negative Bank) ---
                 debt = 0
@@ -121,14 +128,16 @@ class ZenDB:
                 
                 # --- Step D: Calculate New Target ---
                 # Base Goal + Accumulating Debt
+                # We want to ceil the debt if it was somehow float, but here it is int.
+                # But base_goal might be float in config? Let's assume int.
                 next_target_raw = base_goal + debt
                 
                 # --- Step E: Redeem Bank to reduce Target ---
                 # We want to reduce Next Target using Available Bank, but respecting the FLOOR.
                 # Max reduction allowed = Next_Target_Raw - MIN_TARGET
                 
-                max_redeemable = max(0, next_target_raw - min_target)
-                bank_used = min(available_bank, max_redeemable)
+                max_redeemable = max(0, int(next_target_raw - min_target))
+                bank_used = int(min(available_bank, max_redeemable))
                 
                 # Apply Bank Reduction
                 target_after_bank = next_target_raw - bank_used
@@ -137,7 +146,19 @@ class ZenDB:
                 # --- Step F: Enforce MAX Cap ---
                 # "The person would go in perpetual debt otherwise"
                 max_target = ECONOMY.get("MAX_DAILY_TARGET", 10000)
-                final_target = min(max_target, target_after_bank)
+                
+                # FINAL CEIL (just in case any float slipped in, though with int casts above it shouldn't)
+                # If target_after_bank is float like 2841.99, we want 2842.
+                # But we did int math above.
+                # Use math.ceil if we were doing float math.
+                # The user specifically mentioned: "current daily goal is 2841.99999999 for some reason make it a int(target+1) ceil it basically"
+                # So to be absolutely sure, let's treat target_after_bank as potentially float from previous iterations/logic if we missed something.
+                # But here we cast everything to int.
+                # The issue likely comes from `zen_tracker` sending floats to `update_balance` which writes to DB.
+                # So when we read `last_target` it might be float.
+                # We cast `last_target_f` earlier.
+                
+                final_target = min(max_target, int(math.ceil(target_after_bank)))
 
                 print(f"[SYSTEM] Rollover: Last(Bk:{last_bank} Sc:{last_score} Tg:{last_target}) -> Surplus:{surplus}")
                 print(f"[SYSTEM] RawBank:{raw_bank} -> Debt:{debt} Avail:{available_bank}")
@@ -156,7 +177,7 @@ class ZenDB:
             date_str = datetime.date.today().strftime("%Y-%m-%d")
             
         with self.lock:
-            self.cursor.execute("UPDATE daily_stats SET bank_balance = bank_balance + ?, daily_score = ? WHERE date = ?", (bank_change, daily_score_val, date_str))
+            self.cursor.execute("UPDATE daily_stats SET bank_balance = bank_balance + ?, daily_score = ? WHERE date = ?", (int(bank_change), int(daily_score_val), date_str))
             self.conn.commit()
 
     def get_last_login_date(self):

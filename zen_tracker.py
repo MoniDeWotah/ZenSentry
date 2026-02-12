@@ -87,13 +87,13 @@ class ZenTracker:
 
         if delta > 1:
             missed_days = delta - 1
-            # Penalty logic: 1200 pts per missed day 
+            # Penalty logic: X pts per missed day 
             # NOTE: With new debt logic, do we still need generic penalty? 
             # User didn't specify removal, but Debt handles "missed work". 
             # Let's keep strict "Absentee Penalty" separate from Performance Debt for now.
             penalty = missed_days * config.ECONOMY.get("DAILY_GOAL", 1400)
             print(f"[AUDIT] Missed {missed_days} days. Deducting {penalty} pts.")
-            self.db.update_balance(-penalty, 0) # Updates Today's row
+            self.db.update_balance(-int(penalty), 0) # Updates Today's row
             self.db.log_event("AUDIT", f"Absentee Penalty: -{penalty}")
         
         self.db.set_last_login_today()
@@ -110,7 +110,7 @@ class ZenTracker:
         if today != self.last_date:
             print("[SYSTEM] Midnight Reset.")
             # 1. Finalize Yesterday
-            self.db.update_balance(0, self.current_score, date_str=self.last_date.strftime("%Y-%m-%d"))
+            self.db.update_balance(0, int(self.current_score), date_str=self.last_date.strftime("%Y-%m-%d"))
             
             # 2. Trigger New Day Rollover
             self.last_date = today
@@ -201,7 +201,7 @@ class ZenTracker:
             if not self.is_paused: self.is_paused = True
             
             # Recalculate Bank for display
-            surplus = max(0, self.current_score - self.daily_target)
+            surplus = max(0, int(self.current_score) - self.daily_target)
             realtime_bank = self.bank_start_balance + surplus
             
             return {"state": "PAUSED", "score": int(self.current_score), "mult": self.multiplier, "bank": realtime_bank, "notify": notification}
@@ -215,7 +215,7 @@ class ZenTracker:
 
         if any(sys in title for sys in config.SYSTEM_TITLES):
              # Recalculate Bank for display
-             surplus = max(0, self.current_score - self.daily_target)
+             surplus = max(0, int(self.current_score) - self.daily_target)
              realtime_bank = self.bank_start_balance + surplus
              return {"state": self.state, "score": int(self.current_score), "mult": self.multiplier, "bank": realtime_bank, "notify": notification}
 
@@ -243,7 +243,7 @@ class ZenTracker:
             self.violation_start_time = None
             
             # Persist on switch
-            self.db.update_balance(0, self.current_score) # Just update score
+            self.db.update_balance(0, int(self.current_score)) # Just update score
 
         raw_state = self._determine_state(title)
         
@@ -311,14 +311,16 @@ class ZenTracker:
         
         # Periodic Save
         if int(time.time()) % 60 == 0:
-             self.db.update_balance(0, self.current_score)
+             self.db.update_balance(0, int(self.current_score))
              
         # ENFORCE FLOOR
         # self.current_score = max(0, self.current_score)
         
         # Calculate Real-Time Dispaly Bank
         # Bank = Start_Bank + Surplus
-        surplus = max(0, self.current_score - self.daily_target)
+        # Calculate Real-Time Dispaly Bank
+        # Bank = Start_Bank + Surplus
+        surplus = max(0, int(self.current_score) - self.daily_target)
         realtime_bank = self.bank_start_balance + surplus
 
         return {

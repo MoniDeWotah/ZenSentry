@@ -22,3 +22,5 @@ tests/
 # IDE
 .vscode/
 .idea/
+
+*.json
