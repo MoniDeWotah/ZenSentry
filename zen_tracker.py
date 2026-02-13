@@ -108,20 +108,26 @@ class ZenTracker:
     def _handle_midnight(self):
         today = datetime.date.today()
         if today != self.last_date:
-            print("[SYSTEM] Midnight Reset.")
-            # 1. Finalize Yesterday
-            self.db.update_balance(0, int(self.current_score), date_str=self.last_date.strftime("%Y-%m-%d"))
-            
-            # 2. Trigger New Day Rollover
-            self.last_date = today
-            self.bank_start_balance, _, self.daily_target = self.db.get_bank_balance()
-            
-            # 3. Reset Stats
-            self.current_score = 0
-            self.goal_reached = False
-            
-            self.db.set_last_login_today()
-            self.db.log_event("SYSTEM", f"New Day. Target: {self.daily_target}")
+            try:
+                print("[SYSTEM] Midnight Reset.")
+                # 1. Finalize Yesterday
+                self.db.update_balance(0, int(self.current_score), date_str=self.last_date.strftime("%Y-%m-%d"))
+                
+                # 2. Trigger New Day Rollover
+                self.bank_start_balance, _, self.daily_target = self.db.get_bank_balance()
+                
+                # 3. Reset Stats
+                self.current_score = 0
+                self.goal_reached = False
+                
+                self.db.set_last_login_today()
+                self.db.log_event("SYSTEM", f"New Day. Target: {self.daily_target}")
+                
+                # 4. Update Date ONLY after success
+                self.last_date = today
+                
+            except Exception as e:
+                print(f"[ERROR] Midnight Rollover Failed: {e}")
 
     def _determine_state(self, title):
         if not title: return "YELLOW"
