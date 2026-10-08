@@ -17,17 +17,33 @@ Zen Sentry is a Python-based focus enforcement tool designed to help you maintai
     - **Deficit**: Added to Tomorrow's Target.
 
 ### 2. Monitoring States
-- **🟩 GREEN (Productive)**: Whitelisted apps (e.g., VS Code, Obsidian) or titles containing session keywords. Multipliers increase streak (1.0x -> 1.5x).
+- **🟩 GREEN (Productive)**: Whitelisted app executables (e.g., VS Code, Obsidian) or titles containing whole session keywords. Multipliers increase streak (1.0x -> 1.5x).
 - **🟨 YELLOW (Neutral)**: Browsers or unknown apps.
 - **🟥 RED (Distraction)**: Blacklisted apps (e.g., Discord, Twitter). Triggers penalties.
 - **🟦 CYAN (Success)**: Activated when you reach your Daily Goal. **Penalties disabled**, points accumulate at 0.5x rate.
 
+App rules match the foreground app's executable identity. Browser rules match the
+actual address-bar hostname, including subdomains, rather than the page title.
+For example, a paper titled "How Facebook uses their datacenters" does not count
+as Facebook. A PDF reader can be productive through the whitelist; an unknown
+browser page can be approved with Trust.
+
+Address detection supports Chrome, Edge, Firefox and compatible browser address
+controls through Windows UI Automation. If accessibility, the browser version,
+or localized control labels prevent reading the address, the page remains unknown
+and offers Trust; a title alone never proves that a browser is on a blocked site.
+Typing a URL into the address bar does not count as visiting it. Domain matching
+does not match names in paths, query strings, or lookalike domains.
+
 ### 3. Penalties & Enforcement
-- **Grace Period**: You have 10 seconds (configurable) to close a Red app before consequences.
-- **The Wall**: If you stay in a Red app past the grace period:
+- **Grace Period**: You have 10 seconds (configurable) to leave a Red app or approve an unknown Yellow context. Changing a distracting window's title does not restart the timer.
+- **The Wall**: If you stay in an unapproved Red or Yellow context past the grace period:
     - A full-screen overlay blocks your view.
     - **Penalty**: -20 points are deducted immediately.
     - You must type "I will focus" to dismiss the wall.
+    - Only one wall runs at a time. Tracking ticks and incorrect unlock text do not recreate it or repeat the penalty.
+    - Unlocking gives you **30 seconds to switch context**, with no warning overlay or switch penalties. If you are still in an unapproved context afterward, a fresh grace period starts.
+    - Background launches of a second ZenSentry instance are ignored so they cannot create competing walls.
 - **Rapid Switch**: Switching from Red to Green and back to Red within 10s incurs a -10 point penalty.
 
 ### 4. Special Modes
@@ -36,6 +52,7 @@ Zen Sentry is a Python-based focus enforcement tool designed to help you maintai
 - **Idle Check**: If you are idle (no input) for 5 minutes, a check appears.
     - If ignored, you enter "PAUSED" state (no points).
     - **Move mouse or press any key to resume tracking immediately.**
+    - Only audible playback keeps tracking awake; having the volume turned up alone does not.
 
 ## Installation & Usage
 
@@ -50,6 +67,7 @@ Zen Sentry is a Python-based focus enforcement tool designed to help you maintai
      - `WHITELIST_APPS` / `BLACKLIST_APPS`
      - `ECONOMY` values (Daily Goal, Penalty amounts)
      - `TIMING` (Grace period, idle timeout)
+     - Optional `TIMING.UNLOCK_COOLDOWN` (seconds; defaults to 30)
 
 3. **Run**:
    ```bash
@@ -65,5 +83,11 @@ Zen Sentry is a Python-based focus enforcement tool designed to help you maintai
 - If you miss a day, the system detects it on next login and deducts the missed Daily Goal points from your Bank.
 
 Configue through zen_config.json
+
+## Detection regression checks
+
+Run `python -m unittest discover -s tests -p test_focus_regressions.py -v` for
+false title matches, real site detection, overlay lifecycle, unlock recovery,
+idle handling, audio detection, and unchanged daily-goal behavior.
 ---
 *Stay Focused.*

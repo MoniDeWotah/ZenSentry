@@ -3,12 +3,14 @@ import sys
 import zen_config as config
 
 class ZenOverlay:
-    def __init__(self, mode="WALL", score=0, title="Unknown"):
+    def __init__(self, mode="WALL", score=0, title="Unknown", blocked=False):
         self.root = tk.Tk()
         self.mode = mode
         self.score = int(score)
         self.title = title.lower()
-        self.is_blacklisted = any(bad in self.title for bad in config.BLACKLIST_APPS)
+        self.is_blacklisted = blocked
+        self.exit_code = 0
+        self.root.title(f"ZenSentry Overlay - {mode}")
         
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
@@ -24,7 +26,9 @@ class ZenOverlay:
             self._setup_idle(screen_width, screen_height)
         
         self.root.lift()
-        self.root.focus_force()
+        if self.mode == "WALL":
+            self.root.focus_force()
+            self.entry.focus_set()
 
     def _setup_idle(self, w, h):
         self.root.geometry(f"500x200+{w//2-250}+{h//2-100}")
@@ -46,6 +50,8 @@ class ZenOverlay:
         reason = "Blacklisted App" if self.is_blacklisted else "Distraction Limit Exceeded"
         tk.Label(frame, text=f"Reason: {reason}", font=("Arial", 12), fg="#555", bg="black").pack(pady=10)
         tk.Label(frame, text="Type 'I will focus' to unlock.", font=("Arial", 14), fg="white", bg="black").pack(pady=10)
+        tk.Label(frame, text=f"You will have {config.UNLOCK_COOLDOWN}s to switch back to work.",
+                 font=("Arial", 12), fg="#aaaaaa", bg="black").pack(pady=5)
 
         self.entry = tk.Entry(frame, font=("Arial", 20), justify="center")
         self.entry.pack(pady=20, ipadx=10, ipady=5)
@@ -84,21 +90,25 @@ class ZenOverlay:
         btn_drift.pack(side="right", padx=15)
 
     def _check_unlock(self, event):
-        if "focus" in self.entry.get().strip().lower():
+        if self.entry.get().strip().casefold() == "i will focus":
+            self.exit_code = 11
             self.root.destroy()
         else:
             self.entry.delete(0, tk.END)
             self.entry.config(bg="#500000")
 
     def _trust_site(self):
-        sys.exit(10)
+        self.exit_code = 10
+        self.root.destroy()
 
     def run(self):
         self.root.mainloop()
+        return self.exit_code
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "WALL"
     score = sys.argv[2] if len(sys.argv) > 2 else "0"
     title = sys.argv[3] if len(sys.argv) > 3 else "Unknown App"
-    app = ZenOverlay(mode, score, title)
-    app.run()
+    blocked = len(sys.argv) > 4 and sys.argv[4] == "blocked"
+    app = ZenOverlay(mode, score, title, blocked)
+    sys.exit(app.run())
