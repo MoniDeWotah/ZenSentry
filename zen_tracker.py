@@ -5,7 +5,11 @@ import zen_config as config
 import subprocess
 import sys
 import ctypes
-from pycaw.pycaw import AudioUtilities
+import os
+import psutil
+from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
+from zen_browser import BrowserAddressReader
+from zen_detection import BROWSER_PROCESSES, is_blocked, matches_app, matches_keywords, process_name
 
 # --- IDLE & AUDIO HELPERS ---
 class LASTINPUTINFO(ctypes.Structure):
@@ -22,9 +26,15 @@ def is_audio_playing():
     try:
         sessions = AudioUtilities.GetAllSessions()
         for session in sessions:
-            if session.Process and session.Process.name() in ["chrome.exe", "firefox.exe", "spotify.exe", "vlc.exe"]:
-                volume = session.SimpleAudioVolume
-                if volume.GetMasterVolume() > 0.1: return True
+            try:
+                if session.Process and process_name(session.Process.name()) in BROWSER_PROCESSES | {"spotify", "vlc"}:
+                    volume = session.SimpleAudioVolume
+                    if session.State == 1 and not volume.GetMute() and volume.GetMasterVolume() > 0:
+                        meter = session._ctl.QueryInterface(IAudioMeterInformation)
+                        if meter.GetPeakValue() > 0.001:
+                            return True
+            except Exception:
+                continue
         return False
     except: return False
 
@@ -54,6 +64,12 @@ class ZenTracker:
         self.streak_start_time = time.time()
         self.violation_start_time = None
         self.overlay_process = None
+        self.overlay_mode = None
+        self.overlay_blocked = False
+        self.recovery_until = 0
+        self.active_url = None
+        self.active_pid = None
+        self.browser_reader = BrowserAddressReader()
         
         # Modes
         self.trust_mode_expiry = 0     
@@ -99,10 +115,23 @@ class ZenTracker:
         self.db.set_last_login_today()
 
     def _get_active_window_info(self):
+        self.active_pid = None
+        self.active_url = None
         try:
             window = gw.getActiveWindow()
             if not window: return None, None
-            return "unknown_process", window.title.lower()
+            title = window.title.casefold()
+            process = None
+            try:
+                pid = ctypes.c_ulong()
+                ctypes.windll.user32.GetWindowThreadProcessId(window._hWnd, ctypes.byref(pid))
+                self.active_pid = pid.value
+                process = psutil.Process(pid.value).name()
+            except (OSError, AttributeError, TypeError, psutil.Error):
+                pass
+            if process_name(process) in BROWSER_PROCESSES:
+                self.active_url = self.browser_reader.read(window._hWnd, title)
+            return process, title
         except: return None, None
 
     def _handle_midnight(self):
@@ -129,7 +158,7 @@ class ZenTracker:
             except Exception as e:
                 print(f"[ERROR] Midnight Rollover Failed: {e}")
 
-    def _determine_state(self, title):
+    def _determine_state(self, title, process=None, address=None):
         if not title: return "YELLOW"
         
         # 0. Success Mode (Cyan) overrides everything if goal reached
@@ -140,32 +169,56 @@ class ZenTracker:
         self.goal_reached = False
 
         # 1. Blacklist
-        if any(bad in title for bad in config.BLACKLIST_APPS): return "RED"
+        if is_blocked(process, title, address, config.BLACKLIST_APPS): return "RED"
         
         # 2. Whitelist
-        if any(app in title for app in config.WHITELIST_APPS): return "GREEN"
+        if matches_app(process, title, config.WHITELIST_APPS): return "GREEN"
         
         # 3. Trust Mode
         if time.time() < self.trust_mode_expiry: return "TRUSTED_YELLOW" 
         
         # 4. Keywords
-        if any(kw in title for kw in config.SESSION_KEYWORDS): return "GREEN"
+        if matches_keywords(title, config.SESSION_KEYWORDS): return "GREEN"
         
         return "YELLOW"
 
     def _handle_overlay_ipc(self):
         if self.overlay_process:
             ret_code = self.overlay_process.poll()
+            if ret_code is None:
+                return False
+            mode = self.overlay_mode
+            self.overlay_process = None
+            self.overlay_mode = None
+            self.idle_overlay_active = False
+            if mode == "WALL":
+                # The old violation must not survive an acknowledgement. Also
+                # protect against an unexpected wall exit becoming a respawn loop.
+                self.recovery_until = time.monotonic() + config.UNLOCK_COOLDOWN
+                self.violation_start_time = None
+                self.penalty_applied = False
+                self.red_exit_time = 0
             if ret_code == 10:  # TRUST ME SIGNAL
-                self.trust_mode_expiry = time.time() + (config.TIMING["TRUST_DURATION_MINS"] * 60)
+                self.trust_mode_expiry = time.time() + config.TRUST_DURATION
                 self.trust_start_time = time.time()
                 self.db.log_event("TRUST", "Activated Trust Mode")
-                self.overlay_process = None
                 return True
-            elif ret_code is not None:
-                self.overlay_process = None
-                self.idle_overlay_active = False # Reset flag if closed
         return False
+
+    def _stats(self, notification=None, title=None):
+        surplus = max(0, int(self.current_score) - self.daily_target)
+        return {"state": "PAUSED" if self.is_paused else self.state,
+                "score": int(self.current_score), "multiplier": self.multiplier,
+                "bank": self.bank_start_balance + surplus, "target": self.daily_target,
+                "title": title or self.last_window_title, "notify": notification}
+
+    def _close_overlay(self):
+        if self.overlay_process and self.overlay_process.poll() is None:
+            self.overlay_process.kill()
+            self.overlay_process.wait()
+        self.overlay_process = None
+        self.overlay_mode = None
+        self.idle_overlay_active = False
 
     def step(self):
         self._handle_midnight()
@@ -174,7 +227,7 @@ class ZenTracker:
         if self.goal_reached:
             notification = "DAILY GOAL REACHED! Penalties Disabled."
 
-        _, title = self._get_active_window_info()
+        process, title = self._get_active_window_info()
         if not title: title = "idle"
 
         if self._handle_overlay_ipc():
@@ -184,6 +237,14 @@ class ZenTracker:
             self.trust_active_session = True
             self.shadow_multiplier = self.multiplier
             self.multiplier = 1.0
+
+        # Our own wall/ghost is not a new user context. While the wall is open,
+        # freeze enforcement even if an underlying window temporarily has focus.
+        if self.overlay_process and (
+                self.overlay_mode == "WALL" or
+                (self.overlay_mode == "GHOST" and self.active_pid is not None and
+                 self.active_pid == self.overlay_process.pid)):
+            return self._stats(notification, title)
 
         # --- IDLE LOGIC ---
         idle_top = get_idle_duration()
@@ -198,68 +259,65 @@ class ZenTracker:
         # Dismiss Idle Overlay on Input/Audio
         if self.idle_overlay_active:
             if idle_top < 1 or is_audio:
-                if self.overlay_process: self.overlay_process.kill()
-                self.overlay_process = None
-                self.idle_overlay_active = False
+                self._close_overlay()
         
         # Standard Idle Pause
         if idle_top > self.idle_timeout_override and not is_audio:
             if not self.is_paused: self.is_paused = True
+            self.violation_start_time = None
             
-            # Recalculate Bank for display
-            surplus = max(0, int(self.current_score) - self.daily_target)
-            realtime_bank = self.bank_start_balance + surplus
-            
-            return {"state": "PAUSED", "score": int(self.current_score), "mult": self.multiplier, "bank": realtime_bank, "notify": notification}
+            return self._stats(notification, title)
         
-        if self.is_paused and idle_top < 5:
+        if self.is_paused:
             self.is_paused = False
             self.violation_start_time = None
             # Reset override on wake up? Or keep it for session? Keeping for session as per user implication.
 
         # ------------------
 
-        if any(sys in title for sys in config.SYSTEM_TITLES):
-             # Recalculate Bank for display
-             surplus = max(0, int(self.current_score) - self.daily_target)
-             realtime_bank = self.bank_start_balance + surplus
-             return {"state": self.state, "score": int(self.current_score), "mult": self.multiplier, "bank": realtime_bank, "notify": notification}
+        if title.strip().casefold() in {name.casefold() for name in config.SYSTEM_TITLES}:
+             self.violation_start_time = None
+             return self._stats(notification, title)
+
+        raw_state = self._determine_state(title, process, self.active_url)
+        recovering = time.monotonic() < self.recovery_until
 
         # Switch Logic
         if title != self.last_window_title:
-            if not self.goal_reached:
+            if not self.goal_reached and not recovering:
                 self.current_score += config.POINTS["SWITCH_TAX"]
                 
-                # Trust Betrayal Check
-                if time.time() < (self.trust_start_time + 120):
-                    if any(bad in title for bad in config.BLACKLIST_APPS):
-                        print("[ALERT] TRUST BETRAYED!")
-                        self.current_score += config.POINTS["BETRAYAL"]
-                        self.trust_mode_expiry = 0
             
             # Shadow Restore Check
             if self.trust_active_session:
-                current_state = self._determine_state(title)
+                current_state = raw_state
                 if current_state == "GREEN":
                     self.multiplier = self.shadow_multiplier
                     self.trust_active_session = False
             
             self.db.log_event("SWITCH", f"To: {title[:30]}")
             self.last_window_title = title
-            self.violation_start_time = None
             
             # Persist on switch
             self.db.update_balance(0, int(self.current_score)) # Just update score
 
-        raw_state = self._determine_state(title)
-        
+        # An address can become available after the title has already been seen.
+        # Check confirmed transitions, rather than charging for title mentions.
+        if (raw_state == "RED" and self.state != "RED" and not recovering and
+                self.is_trust_active() and self.trust_start_time > 0 and
+                time.time() < self.trust_start_time + 120):
+            self.current_score += config.POINTS["BETRAYAL"]
+            self.trust_mode_expiry = 0
+            self.db.log_event("PENALTY", "Trust betrayed: blocked app/site")
+            self.db.update_balance(0, int(self.current_score))
+
         # RAPID SWITCH PENALTY (Red -> Green -> Red within 10s)
         # Check transition from previous state
-        if self.state == "RED" and raw_state == "GREEN":
-            self.red_exit_time = time.time()
+        if self.state == "RED" and raw_state == "GREEN" and not recovering:
+            self.red_exit_time = time.monotonic()
         
         if self.state in ["GREEN", "YELLOW"] and raw_state == "RED":
-             if time.time() - self.red_exit_time < config.RAPID_SWITCH_LIMIT:
+             if not recovering and self.red_exit_time and time.monotonic() - self.red_exit_time < config.RAPID_SWITCH_LIMIT:
                  if not self.goal_reached:
                      print("[PENALTY] Rapid Switch Detected!")
                      self.current_score += config.POINTS["RAPID_SWITCH"]
@@ -272,9 +330,9 @@ class ZenTracker:
             self.state = raw_state
 
         # Violation Logic
-        if self.state in ["RED", "YELLOW"] and not self.goal_reached: # No Penalties if Goal Reached
-            if self.violation_start_time is None: self.violation_start_time = time.time()
-            elapsed = time.time() - self.violation_start_time
+        if self.state in ["RED", "YELLOW"] and not self.goal_reached and not recovering:
+            if self.violation_start_time is None: self.violation_start_time = time.monotonic()
+            elapsed = time.monotonic() - self.violation_start_time
             
             if elapsed > config.GRACE_PERIOD:
                 self._trigger_overlay("WALL")
@@ -285,14 +343,14 @@ class ZenTracker:
                     self.current_score += config.POINTS["PENALTY"]
                     self.db.log_event("PENALTY", "Focus Breach Detected")
                     self.penalty_applied = True
+                    self.db.update_balance(0, int(self.current_score))
             else:
                 self._trigger_overlay("GHOST")
         else:
             self.violation_start_time = None
             self.penalty_applied = False # Reset flag
             if self.overlay_process and not self.idle_overlay_active: # Don't kill Idle Check
-                self.overlay_process.kill()
-                self.overlay_process = None
+                self._close_overlay()
 
         # Economy
         if self.goal_reached: # Cyan Mode
@@ -319,25 +377,7 @@ class ZenTracker:
         if int(time.time()) % 60 == 0:
              self.db.update_balance(0, int(self.current_score))
              
-        # ENFORCE FLOOR
-        # self.current_score = max(0, self.current_score)
-        
-        # Calculate Real-Time Dispaly Bank
-        # Bank = Start_Bank + Surplus
-        # Calculate Real-Time Dispaly Bank
-        # Bank = Start_Bank + Surplus
-        surplus = max(0, int(self.current_score) - self.daily_target)
-        realtime_bank = self.bank_start_balance + surplus
-
-        return {
-            "state": self.state,
-            "score": int(self.current_score),
-            "multiplier": self.multiplier,
-            "title": title,
-            "bank": realtime_bank,
-            "target": self.daily_target,
-            "notify": notification
-        }
+        return self._stats(notification, title)
 
     def _update_multiplier(self):
         now = time.time()
@@ -347,13 +387,17 @@ class ZenTracker:
         else: self.multiplier = 1.0
 
     def _trigger_overlay(self, mode):
+        blocked = self.state == "RED"
         if self.overlay_process and self.overlay_process.poll() is None:
-            if mode == "WALL" or mode == "IDLE_CHECK": pass 
-            else: return
+            if self.overlay_mode == "WALL":
+                return
+            if self.overlay_mode == mode and (mode != "GHOST" or self.overlay_blocked == blocked):
+                return
+            self._close_overlay()
         
-        cmd = [sys.executable, "zen_overlay.py", mode, str(int(self.current_score)), self.last_window_title or "Unknown"]
-        
-        if self.overlay_process and self.overlay_process.poll() is None:
-             if mode == "GHOST": return 
-             self.overlay_process.kill()
+        cmd = [sys.executable, os.path.join(config.BASE_DIR, "zen_overlay.py"), mode,
+               str(int(self.current_score)), self.last_window_title or "Unknown",
+               "blocked" if blocked else "unknown"]
         self.overlay_process = subprocess.Popen(cmd)
+        self.overlay_mode = mode
+        self.overlay_blocked = blocked

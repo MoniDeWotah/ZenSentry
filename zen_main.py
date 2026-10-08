@@ -1,5 +1,8 @@
 import threading
 import time
+import ctypes
+from ctypes import wintypes
+import comtypes
 import pystray
 from PIL import Image, ImageDraw
 from pystray import MenuItem as item
@@ -14,6 +17,7 @@ class ZenSentryApp:
         self.is_tracking = True
         self.icon = None
         self.tracker = ZenTracker(self.db)
+        self.tracker_lock = threading.RLock()
         self.tracker_thread = threading.Thread(target=self._tracker_loop, daemon=True)
 
     def _create_image(self, color):
@@ -25,11 +29,21 @@ class ZenSentryApp:
         return image
 
     def _tracker_loop(self):
+        comtypes.CoInitialize()
+        try:
+            self._run_tracker_loop()
+        finally:
+            comtypes.CoUninitialize()
+
+    def _run_tracker_loop(self):
         print("[SYSTEM] Tracker Thread Started")
         while self.is_running:
             if self.is_tracking and self.icon:
                 try:
-                    stats = self.tracker.step()
+                    with self.tracker_lock:
+                        if not self.is_tracking:
+                            continue
+                        stats = self.tracker.step()
                     
                     # Update Tooltip
                     self.icon.title = f"ZenSentry | Bank: {stats['bank']} | Daily: {stats['score']} / {stats['target']}"
@@ -57,16 +71,22 @@ class ZenSentryApp:
             time.sleep(config.HEARTBEAT_INTERVAL)
 
     def on_toggle_log(self, icon, item):
-        self.is_tracking = not self.is_tracking
-        if self.is_tracking:
-            self.db.log_event("SESSION", "Log In")
-            icon.icon = self._create_image(config.ICON_COLOR_ACTIVE)
-        else:
-            self.db.log_event("SESSION", "Log Out")
-            icon.icon = self._create_image(config.ICON_COLOR_PAUSED)
+        with self.tracker_lock:
+            self.is_tracking = not self.is_tracking
+            if self.is_tracking:
+                self.db.log_event("SESSION", "Log In")
+                icon.icon = self._create_image(config.ICON_COLOR_ACTIVE)
+            else:
+                self.tracker.violation_start_time = None
+                self.tracker._close_overlay()
+                self.db.log_event("SESSION", "Log Out")
+                icon.icon = self._create_image(config.ICON_COLOR_PAUSED)
 
     def on_exit(self, icon, item):
         self.is_running = False
+        self.tracker_thread.join()
+        self.tracker._close_overlay()
+        self.db.update_balance(0, int(self.tracker.current_score))
         self.db.close()
         icon.stop()
 
@@ -84,5 +104,17 @@ class ZenSentryApp:
         self.icon.run()
 
 if __name__ == "__main__":
-    app = ZenSentryApp()
-    app.run()
+    # A second launch must not create another tracker and competing focus walls.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    instance_lock = kernel32.CreateMutexW(None, False, "Local\\ZenSentry.Tracker")
+    if not instance_lock:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if ctypes.get_last_error() != 183:  # ERROR_ALREADY_EXISTS
+            app = ZenSentryApp()
+            app.run()
+    finally:
+        kernel32.CloseHandle(instance_lock)
